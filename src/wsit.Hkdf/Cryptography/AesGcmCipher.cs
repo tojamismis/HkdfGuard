@@ -8,8 +8,6 @@ public class AesGcmCipher : ISymmetricCipher, IDisposable
     
     private const int TagSize = 16;
     private const int NonceSize = 12;
-    
-    
 
     public AesGcmCipher(ReadOnlySpan<byte> key)
     {

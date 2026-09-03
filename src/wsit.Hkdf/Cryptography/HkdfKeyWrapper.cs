@@ -3,7 +3,7 @@ using wsit.Hkdf.Primitives;
 
 namespace wsit.Hkdf.Cryptography;
 
-public class HkdfKeyWrapper(IKeyDerivationFunction keyDerivation, IKeyInputStorage keyStorage, ISymmetricCipher cipher, byte[] rawKey, string serviceName) : IKeyWrapper
+public class HkdfKeyWrapper(IKeyDerivationFunction keyDerivation, IKeyInputStorage keyStorage, ISymmetricCipher cipher, IHash hash, byte[] rawKey, string serviceName) : IKeyWrapper
 {
     public int Encrypt(Span<byte> plaintext, Span<byte> result)
         => Encrypt(plaintext, ReadOnlySpan<byte>.Empty, result);
@@ -13,7 +13,7 @@ public class HkdfKeyWrapper(IKeyDerivationFunction keyDerivation, IKeyInputStora
         Span<byte> key = stackalloc byte[32];
         try
         {
-            if(!KeyBlob.TryParse(rawKey, out var blob))
+            if(!KeyBlob.TryLoad(rawKey, keyDerivation, keyStorage, hash, serviceName, out var blob))
                 throw new CryptographicException("Invalid protected key format");
 
             var nonce = result.Slice(0, 32);
@@ -35,12 +35,12 @@ public class HkdfKeyWrapper(IKeyDerivationFunction keyDerivation, IKeyInputStora
         Span<byte> key = stackalloc byte[32];
         try
         {
-            if(!KeyBlob.TryParse(rawKey, out var blob))
+            if(!KeyBlob.TryLoad(rawKey, keyDerivation, keyStorage, hash, serviceName, out var blob))
                 throw new CryptographicException("Invalid protected key format");
 
             var nonce = ciphertext.Slice(0, 32);
             keyDerivation.Derive(nonce, blob, keyStorage, serviceName, key);
-            return cipher.Decrypt(ciphertext.Slice(32, result.Length - 32), result) - 32;
+            return cipher.Decrypt(ciphertext.Slice(32, ciphertext.Length - 32), result);
         }
         finally
         {
