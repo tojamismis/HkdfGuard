@@ -25,21 +25,23 @@ public class HkdfKeyWrapperTests
         var keyDerivation = new Pbkdf2KeyDerivationFunction();
         var storage = new InMemoryKeyInputStorage();
         var hash = new HmacSha256Hash();
-        using var cipher = new AesGcmCipher(RandomNumberGenerator.GetBytes(32));
+        var cipher = new AesGcmCipher();
         var rawKey = CreateProtectedKeyBlob(keyDerivation, storage, hash);
         var wrapper = new HkdfKeyWrapper(keyDerivation, storage, cipher, hash, rawKey, ServiceName);
 
         var plaintext = "top secret"u8.ToArray();
+        // AesGcmCipher.Encrypt zeroes the plaintext span it's given as a side effect, so snapshot it first.
+        var expectedPlaintext = (byte[])plaintext.Clone();
         var encrypted = new byte[plaintext.Length + 60];
 
         var written = wrapper.Encrypt(plaintext, encrypted);
         Assert.Equal(encrypted.Length, written);
 
-        var decrypted = new byte[plaintext.Length];
+        var decrypted = new byte[expectedPlaintext.Length];
         var decryptedLength = wrapper.Decrypt(encrypted, decrypted);
 
-        Assert.Equal(plaintext.Length, decryptedLength);
-        Assert.Equal(plaintext, decrypted);
+        Assert.Equal(expectedPlaintext.Length, decryptedLength);
+        Assert.Equal(expectedPlaintext, decrypted);
     }
 
     [Fact]
@@ -48,7 +50,7 @@ public class HkdfKeyWrapperTests
         var keyDerivation = new Pbkdf2KeyDerivationFunction();
         var storage = new InMemoryKeyInputStorage();
         var hash = new HmacSha256Hash();
-        using var cipher = new AesGcmCipher(RandomNumberGenerator.GetBytes(32));
+        var cipher = new AesGcmCipher();
         var wrapper = new HkdfKeyWrapper(keyDerivation, storage, cipher, hash, new byte[10], ServiceName);
 
         var plaintext = "top secret"u8.ToArray();
@@ -63,10 +65,10 @@ public class HkdfKeyWrapperTests
         var keyDerivation = new Pbkdf2KeyDerivationFunction();
         var storage = new InMemoryKeyInputStorage();
         var hash = new HmacSha256Hash();
-        using var cipher = new AesGcmCipher(RandomNumberGenerator.GetBytes(32));
+        var cipher = new AesGcmCipher();
         var wrapper = new HkdfKeyWrapper(keyDerivation, storage, cipher, hash, new byte[10], ServiceName);
 
-        var ciphertext = new byte[70];
+        var ciphertext = RandomNumberGenerator.GetBytes(70);
         var result = new byte[10];
 
         Assert.Throws<CryptographicException>(() => wrapper.Decrypt(ciphertext, result));

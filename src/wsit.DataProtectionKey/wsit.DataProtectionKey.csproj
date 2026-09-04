@@ -6,4 +6,8 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
 
+    <ItemGroup>
+      <ProjectReference Include="..\wsit.Hkdf\wsit.Hkdf.csproj" />
+    </ItemGroup>
+
 </Project>

@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using wsit.Hkdf.Diagnostics;
+using wsit.Hkdf.Utilities;
 
 namespace wsit.Hkdf.Primitives;
 
@@ -48,7 +50,18 @@ public readonly ref struct KeyBlob
         string serviceName,
         out KeyBlob blob)
     {
+        using var activity = HkdfDiagnostics.ActivitySource.StartActivity("KeyBlob.TryLoad");
+        if (HkdfDiagnostics.EnableSensitiveLogging)
+            HkdfDiagnostics.LogSensitiveOperation(activity, "KeyBlob.TryLoad",
+                ("serviceName", serviceName), ("dataLength", data.Length));
+
         if (data.Length != TotalLength)
+        {
+            blob = default;
+            return false;
+        }
+
+        if (ArrayUtility.IsNullOrEmpty(data))
         {
             blob = default;
             return false;
@@ -75,6 +88,11 @@ public readonly ref struct KeyBlob
 
             blob = candidate;
             return true;
+        }
+        catch (Exception ex)
+        {
+            HkdfDiagnostics.RecordException(activity, ex);
+            throw;
         }
         finally
         {
@@ -105,29 +123,48 @@ public readonly ref struct KeyBlob
         IHash hash,
         string serviceName)
     {
-        if (destination.Length < TotalLength)
-            throw new ArgumentException("Destination buffer too small.", nameof(destination));
+        using var activity = HkdfDiagnostics.ActivitySource.StartActivity("KeyBlob.Create");
+        if (HkdfDiagnostics.EnableSensitiveLogging)
+            HkdfDiagnostics.LogSensitiveOperation(activity, "KeyBlob.Create",
+                ("serviceName", serviceName), ("materialIndex", materialIndex), ("iterationIndex", iterationIndex));
 
-        if (salt.Length != SaltLength)
-            throw new ArgumentException("Salt must be 64 bytes.", nameof(salt));
+        try
+        {
+            if (destination.Length < TotalLength)
+                throw new ArgumentException("Destination buffer too small.", nameof(destination));
 
-        if (encryptedKey.Length != EncryptedKeyLength)
-            throw new ArgumentException("Encrypted key must be 92 bytes.", nameof(encryptedKey));
+            if (salt.Length != SaltLength)
+                throw new ArgumentException("Salt must be 64 bytes.", nameof(salt));
 
-        salt.CopyTo(destination.Slice(0, SaltLength));
-        encryptedKey.CopyTo(destination.Slice(SaltLength, EncryptedKeyLength));
-        destination[SaltLength + EncryptedKeyLength] = iterationIndex;
-        destination[SaltLength + EncryptedKeyLength + 1] = materialIndex;
+            if (encryptedKey.Length != EncryptedKeyLength)
+                throw new ArgumentException("Encrypted key must be 92 bytes.", nameof(encryptedKey));
 
-        var signatureDestination = destination.Slice(SaltLength + EncryptedKeyLength + 2, SignatureLength);
-        var candidate = new KeyBlob(
-            destination.Slice(0, SaltLength),
-            destination.Slice(SaltLength, EncryptedKeyLength),
-            iterationIndex,
-            materialIndex,
-            signatureDestination);
+            if (ArrayUtility.IsNullOrEmpty(salt))
+                throw new ArgumentException("Salt must not be all zero.", nameof(salt));
 
-        ComputeSignature(candidate, keyDerivation, storage, hash, serviceName, signatureDestination);
+            if (ArrayUtility.IsNullOrEmpty(encryptedKey))
+                throw new ArgumentException("Encrypted key must not be all zero.", nameof(encryptedKey));
+
+            salt.CopyTo(destination.Slice(0, SaltLength));
+            encryptedKey.CopyTo(destination.Slice(SaltLength, EncryptedKeyLength));
+            destination[SaltLength + EncryptedKeyLength] = iterationIndex;
+            destination[SaltLength + EncryptedKeyLength + 1] = materialIndex;
+
+            var signatureDestination = destination.Slice(SaltLength + EncryptedKeyLength + 2, SignatureLength);
+            var candidate = new KeyBlob(
+                destination.Slice(0, SaltLength),
+                destination.Slice(SaltLength, EncryptedKeyLength),
+                iterationIndex,
+                materialIndex,
+                signatureDestination);
+
+            ComputeSignature(candidate, keyDerivation, storage, hash, serviceName, signatureDestination);
+        }
+        catch (Exception ex)
+        {
+            HkdfDiagnostics.RecordException(activity, ex);
+            throw;
+        }
     }
 
     // Signs Salt + Iterations + MaterialIdentifier + HostName, binding the blob's header to the

@@ -1,27 +1,49 @@
 using System.Security.Cryptography;
+using wsit.Hkdf.Diagnostics;
+using wsit.Hkdf.Utilities;
 
 namespace wsit.Hkdf.Cryptography;
 
-public class AesGcmCipher : ISymmetricCipher, IDisposable
+public class AesGcmCipher : ISymmetricCipher
 {
-    private readonly AesGcm _aes;
-    
     private const int TagSize = 16;
     private const int NonceSize = 12;
 
-    public AesGcmCipher(ReadOnlySpan<byte> key)
-    {
-        if (key.Length != 32)
-            throw new ArgumentException("AES key must be 256 bits.", nameof(key));
+    public int Encrypt(Span<byte> key, Span<byte> plaintext, Span<byte> result)
+        => Encrypt(key, plaintext, ReadOnlySpan<byte>.Empty, result);
 
-        _aes = new AesGcm(key, TagSize); // AesGcm requires a byte[]
+    public int Encrypt(Span<byte> key, Span<byte> plaintext, ReadOnlySpan<byte> aad, Span<byte> result)
+    {
+        using var activity = HkdfDiagnostics.ActivitySource.StartActivity("AesGcmCipher.Encrypt");
+        if (HkdfDiagnostics.EnableSensitiveLogging)
+            HkdfDiagnostics.LogSensitiveOperation(activity, "AesGcmCipher.Encrypt",
+                ("plaintextLength", plaintext.Length), ("aadLength", aad.Length));
+
+        try
+        {
+            return CoreEncrypt(key, plaintext, aad, result);
+        }
+        catch (Exception ex)
+        {
+            HkdfDiagnostics.RecordException(activity, ex);
+            throw;
+        }
+        finally
+        {
+            ArrayUtility.ZeroMemory(key);
+            ArrayUtility.ZeroMemory(plaintext);
+        }
     }
 
-    public int Encrypt(Span<byte> plaintext, Span<byte> result)
-        => Encrypt(plaintext, ReadOnlySpan<byte>.Empty, result);
-
-    public int Encrypt(Span<byte> plaintext, ReadOnlySpan<byte> aad, Span<byte> result)
+    //Pass to a separate method to convert the key to a ReadOnlySpan for the duration of encryption
+    private int CoreEncrypt(ReadOnlySpan<byte> key, Span<byte> plaintext, ReadOnlySpan<byte> aad, Span<byte> result)
     {
+        if (ArrayUtility.IsNullOrEmpty(key))
+            throw new ArgumentException("AES key must not be empty or all zero.", nameof(key));
+
+        if (ArrayUtility.IsNullOrEmpty(plaintext))
+            throw new ArgumentException("Plaintext must not be empty or all zero.", nameof(plaintext));
+
         if (result.Length < NonceSize + plaintext.Length + TagSize)
             throw new ArgumentException("Result buffer too small.", nameof(result));
 
@@ -32,16 +54,46 @@ public class AesGcmCipher : ISymmetricCipher, IDisposable
 
         RandomNumberGenerator.Fill(nonce);
 
-        _aes.Encrypt(nonce, plaintext, ciphertext, tag, aad);
+        using var aes = new AesGcm(key, TagSize);
+        aes.Encrypt(nonce, plaintext, ciphertext, tag, aad);
 
         return NonceSize + plaintext.Length + TagSize;
     }
 
-    public int Decrypt(ReadOnlySpan<byte> ciphertext, Span<byte> result)
-        => Decrypt(ciphertext, ReadOnlySpan<byte>.Empty, result);
+    public int Decrypt(Span<byte> key, ReadOnlySpan<byte> ciphertext, Span<byte> result)
+        => Decrypt(key, ciphertext, ReadOnlySpan<byte>.Empty, result);
 
-    public int Decrypt(ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> aad, Span<byte> result)
+    public int Decrypt(Span<byte> key, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> aad, Span<byte> result)
     {
+        using var activity = HkdfDiagnostics.ActivitySource.StartActivity("AesGcmCipher.Decrypt");
+        if (HkdfDiagnostics.EnableSensitiveLogging)
+            HkdfDiagnostics.LogSensitiveOperation(activity, "AesGcmCipher.Decrypt",
+                ("ciphertextLength", ciphertext.Length), ("aadLength", aad.Length));
+
+        try
+        {
+            return CoreDecrypt(key, ciphertext, aad, result);
+        }
+        catch (Exception ex)
+        {
+            HkdfDiagnostics.RecordException(activity, ex);
+            throw;
+        }
+        finally
+        {
+            ArrayUtility.ZeroMemory(key);
+        }
+    }
+    
+    //Pass to a separate method to convert the key to a ReadOnlySpan for the duration of decryption
+    private int CoreDecrypt(ReadOnlySpan<byte> key, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> aad, Span<byte> result)
+    {
+        if (ArrayUtility.IsNullOrEmpty(key))
+            throw new ArgumentException("AES key must not be empty or all zero.", nameof(key));
+
+        if (ArrayUtility.IsNullOrEmpty(ciphertext))
+            throw new ArgumentException("Ciphertext must not be empty or all zero.", nameof(ciphertext));
+
         if (ciphertext.Length < NonceSize + TagSize)
             throw new ArgumentException("Ciphertext too short.", nameof(ciphertext));
 
@@ -54,13 +106,9 @@ public class AesGcmCipher : ISymmetricCipher, IDisposable
         var ct = ciphertext.Slice(NonceSize, resultLength);
         var tag = ciphertext.Slice(NonceSize + resultLength, TagSize);
 
-        _aes.Decrypt(nonce, ct, tag, result, aad);
+        using var aes = new AesGcm(key, TagSize);
+        aes.Decrypt(nonce, ct, tag, result, aad);
 
         return resultLength;
-    }
-
-    public void Dispose()
-    {
-        _aes.Dispose();
     }
 }

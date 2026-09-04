@@ -4,12 +4,31 @@ using System.Security.Cryptography;
 
 namespace wsit.Hkdf.Interop;
 
-internal class MacKeyChainStorage : IKeyInputStorage
+internal class MacKeyChainStorage(string service) : IKeyInputStorage
 {
     private const string SecurityFramework = "/System/Library/Frameworks/Security.framework/Security";
     private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
 
-    private readonly string _service;
+    // CFDictionaryCreate needs the standard CFType key/value callback structs (not NULL) so that
+    // consumers like Security framework can look up well-known keys (kSecClass, etc.) by value
+    // instead of raw pointer identity, and so the dictionary properly retains/releases its contents.
+    // These are exported as data symbols (not functions), so they're loaded via NativeLibrary.GetExport
+    // rather than a plain DllImport.
+    private static readonly IntPtr KeyCallbacks;
+    private static readonly IntPtr ValueCallbacks;
+
+    // kCFBooleanTrue is itself declared as a CFBooleanRef (a pointer), so the exported symbol's
+    // address holds the pointer value rather than being the value itself - one extra dereference
+    // versus the callback structs above, which are read directly by address.
+    private static readonly IntPtr KCFBooleanTrue;
+
+    static MacKeyChainStorage()
+    {
+        var coreFoundation = NativeLibrary.Load(CoreFoundation);
+        KeyCallbacks = NativeLibrary.GetExport(coreFoundation, "kCFTypeDictionaryKeyCallBacks");
+        ValueCallbacks = NativeLibrary.GetExport(coreFoundation, "kCFTypeDictionaryValueCallBacks");
+        KCFBooleanTrue = Marshal.ReadIntPtr(NativeLibrary.GetExport(coreFoundation, "kCFBooleanTrue"));
+    }
 
     public int CreateOrGet(string index, scoped Span<byte> material)
     {
@@ -28,7 +47,7 @@ internal class MacKeyChainStorage : IKeyInputStorage
 
         Span<byte> keyMaterial = stackalloc byte[32];
         RandomNumberGenerator.Fill(keyMaterial);
-        using var dict = BuildAddDictionary(_service, index, keyMaterial);
+        using var dict = BuildAddDictionary(service, index, keyMaterial);
 
         int status = SecItemAdd(dict.Handle, out _);
         if (status != 0)
@@ -40,7 +59,7 @@ internal class MacKeyChainStorage : IKeyInputStorage
         if (destination.Length != 32)
             throw new ArgumentException("Destination must be 32 bytes.");
 
-        using var query = BuildQueryDictionary(_service, index);
+        using var query = BuildQueryDictionary(service, index);
 
         int status = SecItemCopyMatching(query.Handle, out IntPtr result);
         if (status != 0 || result == IntPtr.Zero)
@@ -57,10 +76,9 @@ internal class MacKeyChainStorage : IKeyInputStorage
         }
     }
 
-    public void Delete(byte index)
+    public void Delete(string index)
     {
-        string account = $"key-{index}";
-        using var query = BuildDeleteDictionary(_service, account);
+        using var query = BuildDeleteDictionary(service, index);
 
         SecItemDelete(query.Handle);
     }
@@ -94,7 +112,7 @@ internal class MacKeyChainStorage : IKeyInputStorage
             cfData
         };
 
-        return new CFDictionary(keys, values);
+        return new CFDictionary(keys, values, [cfService, cfAccount, cfData]);
     }
 
     private static CFDictionary BuildQueryDictionary(string service, string account)
@@ -115,10 +133,10 @@ internal class MacKeyChainStorage : IKeyInputStorage
             Sec.kSecClassGenericPassword,
             cfService,
             cfAccount,
-            new IntPtr(1)
+            KCFBooleanTrue
         };
 
-        return new CFDictionary(keys, values);
+        return new CFDictionary(keys, values, [cfService, cfAccount]);
     }
 
     private static CFDictionary BuildDeleteDictionary(string service, string account)
@@ -140,7 +158,7 @@ internal class MacKeyChainStorage : IKeyInputStorage
             cfAccount
         };
 
-        return new CFDictionary(keys, values);
+        return new CFDictionary(keys, values, [cfService, cfAccount]);
     }
 
     private static void ReadCFData(IntPtr cfData, Span<byte> dest)
@@ -150,7 +168,9 @@ internal class MacKeyChainStorage : IKeyInputStorage
             throw new Exception("Keychain item is not 32 bytes.");
 
         IntPtr ptr = CFDataGetBytePtr(cfData);
-        Marshal.Copy(ptr, dest.ToArray(), 0, 32);
+        var buffer = new byte[32];
+        Marshal.Copy(ptr, buffer, 0, 32);
+        buffer.CopyTo(dest);
     }
 
     // ---------------- Native Imports ----------------
@@ -187,9 +207,15 @@ internal class MacKeyChainStorage : IKeyInputStorage
 
     // ---------------- CFDictionary Wrapper ----------------
 
+    // CFDictionaryCreate is called with NULL key/value callbacks, so the dictionary does not retain
+    // its contents - the caller must keep them alive for as long as the dictionary is used, then
+    // release them. Only the CFType values created specifically for this dictionary (ownedValues)
+    // are released on Dispose; shared/static values (e.g. the Sec.* constants) must never be passed
+    // there, since they are meant to live for the process's lifetime.
     private sealed class CFDictionary : IDisposable
     {
         public IntPtr Handle { get; }
+        private readonly IntPtr[] _ownedValues;
 
         [DllImport(CoreFoundation)]
         private static extern IntPtr CFDictionaryCreate(
@@ -200,24 +226,26 @@ internal class MacKeyChainStorage : IKeyInputStorage
             IntPtr keyCallbacks,
             IntPtr valueCallbacks);
 
-        public CFDictionary(IntPtr[] keys, IntPtr[] values)
+        public CFDictionary(IntPtr[] keys, IntPtr[] values, IntPtr[] ownedValues)
         {
             Handle = CFDictionaryCreate(
                 IntPtr.Zero,
                 keys,
                 values,
                 keys.Length,
-                IntPtr.Zero,
-                IntPtr.Zero);
+                KeyCallbacks,
+                ValueCallbacks);
 
-            foreach (var v in values)
-                CFRelease(v);
+            _ownedValues = ownedValues;
         }
 
         public void Dispose()
         {
             if (Handle != IntPtr.Zero)
                 CFRelease(Handle);
+
+            foreach (var v in _ownedValues)
+                CFRelease(v);
         }
     }
 
